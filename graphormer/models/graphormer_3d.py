@@ -14,6 +14,14 @@ from fairseq.models import (
     register_model_architecture,
 )
 
+from ..modules import (
+    frac_to_cart_coords,
+    multi_graph,
+    get_extend_atom_index_and_pos,
+    pad_1d,
+    pad_pos
+)
+
 torch._C._jit_set_profiling_mode(False)
 torch._C._jit_set_profiling_executor(False)
 torch._C._jit_override_can_fuse_on_cpu(True)
@@ -143,7 +151,7 @@ class GaussianLayer(nn.Module):
         self.K = K
         self.means = nn.Embedding(1, K)
         self.stds = nn.Embedding(1, K)
-        self.mul = nn.Embedding(edge_types, 1)
+        self.mul = nn.Embedding(edge_types, 1) # 不同类型的边可以有不同的乘法因子
         self.bias = nn.Embedding(edge_types, 1)
         nn.init.uniform_(self.means.weight, 0, 3)
         nn.init.uniform_(self.stds.weight, 0, 3)
@@ -241,7 +249,6 @@ class NodeTaskHead(nn.Module):
         cur_force = torch.cat([f1, f2, f3], dim=-1).float()
         return cur_force
 
-
 @register_model("graphormer3d")
 class Graphormer3D(BaseFairseqModel):
     @classmethod
@@ -310,8 +317,8 @@ class Graphormer3D(BaseFairseqModel):
     def __init__(self, args):
         super().__init__()
         self.args = args
-        self.atom_types = 64
-        self.edge_types = 64 * 64
+        self.atom_types = 128
+        self.edge_types = 128 * 128
         self.atom_encoder = nn.Embedding(
             self.atom_types, self.args.embed_dim, padding_idx=0
         )
@@ -354,11 +361,52 @@ class Graphormer3D(BaseFairseqModel):
         self.num_updates = num_updates
         return super().set_num_updates(num_updates)
 
-    def forward(self, atoms: Tensor, tags: Tensor, pos: Tensor, real_mask: Tensor):
+    #def forward(self, atoms: Tensor, tags: Tensor, pos: Tensor, real_mask: Tensor):
+    def forward(self, data):
+        edge_index, cell_offsets, neighbors = multi_graph(
+                data, 5,data.num_atoms.device
+            )
+        data.edge_index = edge_index
+        data.to_jimages = cell_offsets
+        data.num_bonds = neighbors
+
+        pos,extend_pos = frac_to_cart_coords(
+            data.frac_coords,
+            data.lengths,
+            data.angles,
+            data.num_atoms,
+            cal_extend_pos=True,
+            cell_offsets=data.to_jimages,
+            edge_index=data.edge_index,
+            num_bonds=data.num_bonds
+        )
+
+        extend_atom, extend_pos = get_extend_atom_index_and_pos(data.edge_index,extend_pos,data.num_atoms)
+
+        # 用extend_atom为索引，去data.atom_types中取值
+        extend_atom = [data.atom_types[extend_atom[i]] for i in range(len(extend_atom))]
+
+        atoms_sample = [
+            torch.cat([data.atom_types[:data.num_atoms[i]],extend_atom[i]],dim=0) for i in range(data.num_atoms.size(0))
+        ]
+        pos_sample = [
+            torch.cat([pos[:data.num_atoms[i]],extend_pos[i]],dim=0) for i in range(data.num_atoms.size(0))
+        ]
+
+        atoms = pad_1d(atoms_sample)
+        atoms = atoms.long()
+        pos = pad_pos(pos_sample,len(atoms[0]))
+        tags = torch.ones_like(atoms)
+
+        real_mask = torch.ones_like(tags)
+        for i in range(data.num_atoms.size(0)):
+            real_mask[i,data.num_atoms[i]:] = 0
+        
+        # =====================
         padding_mask = atoms.eq(0)
 
         n_graph, n_node = atoms.size()
-        delta_pos = pos.unsqueeze(1) - pos.unsqueeze(2)
+        delta_pos = pos.unsqueeze(1) - pos.unsqueeze(2) # (batch,n_node,3) => (batch,1,n_node,3) - (batch,n_node,1,3) = (batch,n_node,n_node,3)
         dist: Tensor = delta_pos.norm(dim=-1)
         delta_pos /= dist.unsqueeze(-1) + 1e-5
 

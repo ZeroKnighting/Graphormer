@@ -86,16 +86,16 @@ class PBCDataset:
         atoms = data["atoms"]
         tags = data["tags"]
 
-        offsets = torch.matmul(self.cell_offsets, cell).view(self.n_cells, 1, 3)
+        offsets = torch.matmul(self.cell_offsets, cell).view(self.n_cells, 1, 3) 
         expand_pos = (pos.unsqueeze(0).expand(self.n_cells, -1, -1) + offsets).view(
             -1, 3
-        )
+        ) # 
         expand_pos_relaxed = (
             pos.unsqueeze(0).expand(self.n_cells, -1, -1) + offsets
-        ).view(-1, 3)
-        src_pos = pos[tags > 1] if self.filter_by_tag else pos
+        ).view(-1, 3) # 
+        src_pos = pos[tags > 1] if self.filter_by_tag else pos # 
 
-        dist: Tensor = (src_pos.unsqueeze(1) - expand_pos.unsqueeze(0)).norm(dim=-1)
+        dist: Tensor = (src_pos.unsqueeze(1) - expand_pos.unsqueeze(0)).norm(dim=-1) 
         used_mask = (dist < self.cutoff).any(dim=0) & tags.ne(2).repeat(
             self.n_cells
         )  # not copy ads
@@ -264,6 +264,7 @@ class IS2RETask(FairseqTask):
         db_path = str(Path(self.cfg.data) / split / "data.lmdb")
         lmdb_dataset = LMDBDataset(db_path)
         pbc_dataset = PBCDataset(lmdb_dataset)
+        print(pbc_dataset[1])
 
         atoms = AtomDataset(pbc_dataset, "atoms")
         tags = KeywordDataset(pbc_dataset, "tags")
